@@ -37,6 +37,8 @@
 #define ADC_SCALE 128.0f
 #define SPECTRUM_FLOOR_DB -120.0f
 #define SPECTRUM_SMOOTHING_ALPHA 0.18f
+#define RTLSDR_ASYNC_BUFFER_COUNT 12U
+#define RTLSDR_ASYNC_BUFFER_LENGTH 16384U
 #define RTLSDR_ERROR_NO_DEVICE -4
 
 /*
@@ -664,7 +666,12 @@ static gpointer radio_engine_thread(gpointer user_data) {
         }
     }
 
-    result = rtlsdr_read_async(dev, rtlsdr_callback, engine, 0, 0);
+    result = rtlsdr_read_async(
+        dev,
+        rtlsdr_callback,
+        engine,
+        RTLSDR_ASYNC_BUFFER_COUNT,
+        RTLSDR_ASYNC_BUFFER_LENGTH);
 
     stop_audio_backend(engine);
 
