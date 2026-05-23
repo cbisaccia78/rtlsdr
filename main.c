@@ -33,8 +33,8 @@ typedef struct {
 
 static const SampleRateOption sample_rate_options[] = {
     {256000U, "0.256 MS/s"},
-    {512000U, "0.512 MS/s"},
-    {768000U, "0.768 MS/s"},
+    {288000U, "0.288 MS/s"},
+    {900001U, "0.900 MS/s"},
     {1024000U, "1.024 MS/s"},
     {1536000U, "1.536 MS/s"},
     {2048000U, "2.048 MS/s"},
