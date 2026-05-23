@@ -32,6 +32,7 @@ static const SampleRateOption sample_rate_options[] = {
     {2560000U, "2.560 MS/s"}
 };
 
+/* Read the sample-rate dropdown and map it back to a concrete Hz value. */
 static uint32_t selected_sample_rate(AppWidgets *widgets) {
     guint selected = gtk_drop_down_get_selected(widgets->sample_rate_dropdown);
 
@@ -42,16 +43,24 @@ static uint32_t selected_sample_rate(AppWidgets *widgets) {
     return sample_rate_options[selected].value;
 }
 
+/* Push a short status message into the GTK status label. */
 static void set_status_text(AppWidgets *widgets, const char *message) {
     gtk_label_set_text(widgets->status_label, message);
 }
 
+/* Convert a spectrum bin index into a frequency offset from center in Hz. */
 static double bin_frequency_hz(const RadioEngineSnapshot *snapshot, guint bin_index) {
     double normalized = ((double)bin_index / (double)RADIO_SPECTRUM_BINS) - 0.5;
 
     return normalized * (double)snapshot->sample_rate_hz;
 }
 
+/*
+ * Render the live FFT spectrum into the drawing area.
+ *
+ * The plot uses dB on the vertical axis and sample-rate-relative frequency on
+ * the horizontal axis, with the tuner center frequency positioned in the middle.
+ */
 static void draw_spectrum(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
     AppWidgets *widgets = user_data;
     const RadioEngineSnapshot *snapshot = &widgets->snapshot;
@@ -148,6 +157,7 @@ static void draw_spectrum(GtkDrawingArea *area, cairo_t *cr, int width, int heig
     cairo_stroke(cr);
 }
 
+/* Rebuild the textual statistics panel from the latest engine snapshot. */
 static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapshot) {
     char *stats;
     double peak_db = -120.0;
@@ -177,6 +187,7 @@ static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapsho
     g_free(stats);
 }
 
+/* Periodic GTK timer that refreshes labels, button state, and the spectrum plot. */
 static gboolean refresh_ui(gpointer user_data) {
     AppWidgets *widgets = user_data;
     radio_engine_get_snapshot(widgets->engine, &widgets->snapshot);
@@ -191,6 +202,7 @@ static gboolean refresh_ui(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
+/* Validate and apply the current UI control values to the radio engine. */
 static gboolean apply_settings(AppWidgets *widgets, gboolean show_partial_message) {
     char message[160];
     uint32_t center_freq_hz = (uint32_t)gtk_spin_button_get_value_as_int(widgets->center_freq_spin);
@@ -214,6 +226,7 @@ static gboolean apply_settings(AppWidgets *widgets, gboolean show_partial_messag
     return TRUE;
 }
 
+/* GTK signal handler for the Apply button. */
 static void on_apply_clicked(GtkButton *button, gpointer user_data) {
     AppWidgets *widgets = user_data;
 
@@ -221,6 +234,7 @@ static void on_apply_clicked(GtkButton *button, gpointer user_data) {
     apply_settings(widgets, TRUE);
 }
 
+/* GTK signal handler that applies settings and starts streaming. */
 static void on_start_clicked(GtkButton *button, gpointer user_data) {
     AppWidgets *widgets = user_data;
     char message[160];
@@ -238,6 +252,7 @@ static void on_start_clicked(GtkButton *button, gpointer user_data) {
     set_status_text(widgets, "Starting stream...");
 }
 
+/* GTK signal handler that stops the active RTL-SDR stream. */
 static void on_stop_clicked(GtkButton *button, gpointer user_data) {
     AppWidgets *widgets = user_data;
 
@@ -246,6 +261,7 @@ static void on_stop_clicked(GtkButton *button, gpointer user_data) {
     set_status_text(widgets, "Stopping stream...");
 }
 
+/* Build the full control panel layout for the main application window. */
 static GtkWidget *build_controls(AppWidgets *widgets) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     GtkWidget *grid = gtk_grid_new();
@@ -318,6 +334,7 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     return box;
 }
 
+/* Application shutdown hook that removes timers and releases engine/UI state. */
 static void on_app_shutdown(GApplication *application, gpointer user_data) {
     AppWidgets *widgets = user_data;
 
@@ -330,6 +347,7 @@ static void on_app_shutdown(GApplication *application, gpointer user_data) {
     g_free(widgets);
 }
 
+/* GTK application activation hook that creates the window and starts UI polling. */
 static void on_activate(GtkApplication *application, gpointer user_data) {
     AppWidgets *widgets = user_data;
     GtkWidget *window;
@@ -351,6 +369,7 @@ static void on_activate(GtkApplication *application, gpointer user_data) {
     gtk_window_present(GTK_WINDOW(window));
 }
 
+/* Program entry point. Creates the GTK application and enters its event loop. */
 int main(int argc, char *argv[]) {
     AppWidgets *widgets = g_new0(AppWidgets, 1);
     GtkApplication *application = gtk_application_new("com.cole.rtlsdrgtk", G_APPLICATION_DEFAULT_FLAGS);
