@@ -26,6 +26,7 @@
 #define MAX_AUDIO_SAMPLES_PER_BLOCK ((RADIO_SPECTRUM_BINS * AUDIO_OUTPUT_SAMPLE_RATE / MIN_RADIO_SAMPLE_RATE) + 8U)
 #define FM_AUDIO_LOWPASS_ALPHA 0.22f
 #define AM_AUDIO_LOWPASS_ALPHA 0.06f
+#define AM_AUDIO_HIGHPASS_ALPHA 0.985f
 #define FM_DEEMPHASIS_TIME_CONSTANT_US 75.0f
 #define AM_AUDIO_TARGET_LEVEL 0.20f
 #define AM_AUDIO_AGC_ATTACK_ALPHA 0.20f
@@ -113,6 +114,7 @@ typedef struct RadioEngine {
     FmDemodState fm_demod_state;
     AudioLowPassState fm_audio_lowpass_state;
     AudioLowPassState am_audio_lowpass_state;
+    AudioHighPassState am_audio_highpass_state;
     FmDeemphasisState fm_deemphasis_state;
     AmAgcState am_agc_state;
     AudioBuffer *audio_buffer;
@@ -236,6 +238,7 @@ static void stop_audio_backend(RadioEngine *engine) {
     engine->audio_resample_accumulator = 0.0;
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
+    demodulator_reset_highpass(&engine->am_audio_highpass_state);
     demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
     demodulator_reset_am_agc(&engine->am_agc_state);
     configure_channelizer(engine);
@@ -465,6 +468,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
                                 (float)engine->audio_sample_rate_hz,
                                 FM_DEEMPHASIS_TIME_CONSTANT_US);
                         } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
+                            demodulator_apply_highpass(&engine->am_audio_highpass_state, resampled_audio, resampled_count, AM_AUDIO_HIGHPASS_ALPHA);
                             demodulator_apply_am_agc(
                                 &engine->am_agc_state,
                                 resampled_audio,
@@ -736,6 +740,7 @@ RadioEngine *radio_engine_new(void) {
     demodulator_reset_fm(&engine->fm_demod_state);
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
+    demodulator_reset_highpass(&engine->am_audio_highpass_state);
     demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
     demodulator_reset_am_agc(&engine->am_agc_state);
     engine->device_count = rtlsdr_get_device_count();
@@ -800,6 +805,7 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
     engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
     configure_channelizer(engine);
+    demodulator_reset_highpass(&engine->am_audio_highpass_state);
     demodulator_reset_am_agc(&engine->am_agc_state);
     if (engine->running) {
         set_status_locked(engine, "Sample rate queued. Stop and restart to apply %.3f MS/s.", sample_rate_hz / 1000000.0);
@@ -830,6 +836,7 @@ bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode,
         demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
     }
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
+    demodulator_reset_highpass(&engine->am_audio_highpass_state);
     demodulator_reset_am_agc(&engine->am_agc_state);
     if (demod_mode != RADIO_DEMOD_MODE_FM) {
         demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
@@ -904,6 +911,7 @@ bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_
     configure_channelizer(engine);
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
+    demodulator_reset_highpass(&engine->am_audio_highpass_state);
     demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
     demodulator_reset_am_agc(&engine->am_agc_state);
     for (uint32_t index = 0; index < RADIO_SPECTRUM_BINS; index++) {

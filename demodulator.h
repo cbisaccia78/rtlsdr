@@ -19,6 +19,13 @@ typedef struct {
     int has_previous_output;
 } AudioLowPassState;
 
+/* One-pole audio high-pass state used to suppress DC and low-frequency hum. */
+typedef struct {
+    float previous_input;
+    float previous_output;
+    int has_previous_sample;
+} AudioHighPassState;
+
 /* FM deemphasis state modeled as a first-order IIR at audio sample rate. */
 typedef struct {
     float previous_input;
@@ -36,6 +43,9 @@ void demodulator_reset_fm(FmDemodState *state);
 
 /* Reset the state used by the simple audio low-pass filter. */
 void demodulator_reset_lowpass(AudioLowPassState *state);
+
+/* Reset the state used by the simple audio high-pass filter. */
+void demodulator_reset_highpass(AudioHighPassState *state);
 
 /* Reset the FM deemphasis state before starting a new audio stream. */
 void demodulator_reset_fm_deemphasis(FmDeemphasisState *state);
@@ -72,6 +82,9 @@ void demodulator_normalize_audio(float *samples, size_t sample_count);
 
 /* Apply a simple one-pole low-pass filter in place. */
 void demodulator_apply_lowpass(AudioLowPassState *state, float *samples, size_t sample_count, float alpha);
+
+/* Apply a simple one-pole high-pass filter in place. */
+void demodulator_apply_highpass(AudioHighPassState *state, float *samples, size_t sample_count, float alpha);
 
 /* Apply a first-order FM deemphasis curve in place. */
 void demodulator_apply_fm_deemphasis(

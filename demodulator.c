@@ -20,6 +20,16 @@ void demodulator_reset_lowpass(AudioLowPassState *state) {
     state->has_previous_output = 0;
 }
 
+void demodulator_reset_highpass(AudioHighPassState *state) {
+    if (!state) {
+        return;
+    }
+
+    state->previous_input = 0.0f;
+    state->previous_output = 0.0f;
+    state->has_previous_sample = 0;
+}
+
 void demodulator_reset_fm_deemphasis(FmDeemphasisState *state) {
     if (!state) {
         return;
@@ -143,6 +153,38 @@ void demodulator_apply_lowpass(AudioLowPassState *state, float *samples, size_t 
 
     state->previous_output = previous_output;
     state->has_previous_output = 1;
+}
+
+void demodulator_apply_highpass(AudioHighPassState *state, float *samples, size_t sample_count, float alpha) {
+    float previous_input;
+    float previous_output;
+
+    if (!state || !samples || sample_count == 0) {
+        return;
+    }
+
+    if (alpha <= 0.0f) {
+        alpha = 0.0f;
+    }
+    if (alpha >= 1.0f) {
+        alpha = 1.0f;
+    }
+
+    previous_input = state->has_previous_sample ? state->previous_input : samples[0];
+    previous_output = state->has_previous_sample ? state->previous_output : 0.0f;
+
+    for (size_t index = 0; index < sample_count; index++) {
+        float current_input = samples[index];
+        float current_output = alpha * (previous_output + current_input - previous_input);
+
+        samples[index] = current_output;
+        previous_input = current_input;
+        previous_output = current_output;
+    }
+
+    state->previous_input = previous_input;
+    state->previous_output = previous_output;
+    state->has_previous_sample = 1;
 }
 
 void demodulator_apply_fm_deemphasis(
