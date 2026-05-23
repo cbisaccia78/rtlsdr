@@ -1,11 +1,14 @@
 # RTL-SDR GTK Spectrum Viewer
 
-This project is a small RTL-SDR desktop application written in C. It uses GTK 4 for the GUI, `librtlsdr` for hardware access, and Apple Accelerate for FFT processing. The code is split into a radio engine layer and a UI layer.
+This project is a small RTL-SDR desktop application written in C. It uses GTK 4 for the GUI, `librtlsdr` for hardware access, Apple Accelerate for FFT processing, and macOS AudioQueue for speaker output. The code is split into a radio engine layer and a UI layer.
 
 ## File Layout
 
 - `radio_engine.h`: public API for the RTL-SDR engine.
 - `radio_engine.c`: worker thread, device control, IQ normalization, and FFT generation.
+- `demodulator.h` / `demodulator.c`: FM and AM demodulation plus basic audio conditioning helpers.
+- `audio_buffer.h` / `audio_buffer.c`: thread-safe float PCM ring buffer shared with the audio backend.
+- `audio_output_mac.h` / `audio_output_mac.c`: macOS AudioQueue output wrapper.
 - `main.c`: GTK application, controls, and spectrum rendering.
 - `Makefile`: build configuration using `pkg-config`.
 
@@ -89,6 +92,7 @@ Use this when the UI needs a consistent view of:
 - the total IQ sample count
 - the most recent normalized IQ sample
 - the current FFT spectrum buffer
+- the current demod/audio activity state
 
 #### `static void copy_message(...)`
 Internal helper that safely copies a short message into an optional output buffer.
@@ -104,6 +108,8 @@ Responsibilities:
 - converts the first sample to normalized float IQ for status display
 - copies one FFT frame worth of samples into split real/imaginary arrays
 - applies a Hann window to reduce spectral leakage
+- demodulates FM or AM audio when requested
+- performs crude RF-to-audio decimation and basic output conditioning
 - executes the FFT with Accelerate
 - converts FFT power to dB values for the GUI spectrum display
 - publishes spectrum and sample stats back into the engine under lock
@@ -200,7 +206,9 @@ Creates the full widget tree for the main window.
 This assembles:
 - the center-frequency input
 - the sample-rate dropdown
+- the demod-mode dropdown
 - Apply / Start / Stop buttons
+- the audio enable/disable button
 - the spectrum analyzer drawing area
 - the stats panel
 - the status panel
@@ -241,5 +249,5 @@ Responsibilities:
 - The center vertical line is `0 Hz` relative to the tuned center frequency.
 - A strong carrier exactly at the tuned frequency appears near the middle.
 - Sidebands appear to the left and right of the carrier at their offset frequencies.
-- The horizontal axis currently shows offset from center, not absolute RF frequency.
+- The horizontal axis shows absolute RF frequency labels derived from the current center frequency and sample rate.
 - The displayed FFT is a quick real-time view, not a calibrated lab measurement.

@@ -211,13 +211,16 @@ static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapsho
     }
 
     stats = g_strdup_printf(
-        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nAudio requested: %s\nAudio active: %s\nAudio samples: %llu\nAudio level: %.3f\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
+        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nAudio requested: %s\nAudio active: %s\nAudio out rate: %.1f kHz\nAudio buffer: %zu / %zu\nAudio samples: %llu\nAudio level: %.3f\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
         snapshot->device_count,
         snapshot->center_freq_hz / 1000000.0,
         snapshot->sample_rate_hz / 1000000.0,
         demod_mode_label(snapshot->demod_mode),
         snapshot->audio_requested ? "yes" : "no",
         snapshot->audio_active ? "yes" : "no",
+        snapshot->audio_output_sample_rate_hz / 1000.0,
+        snapshot->audio_buffer_fill,
+        snapshot->audio_buffer_capacity,
         (unsigned long long)snapshot->audio_samples_generated,
         snapshot->audio_level,
         (unsigned long long)snapshot->total_samples,
@@ -325,7 +328,7 @@ static void on_audio_clicked(GtkButton *button, gpointer user_data) {
     }
 
     gtk_button_set_label(widgets->audio_button, audio_button_label(audio_requested));
-    set_status_text(widgets, audio_requested ? "Audio playback requested. Backend not connected yet." : "Audio playback disabled.");
+    set_status_text(widgets, audio_requested ? "Audio playback enabled." : "Audio playback disabled.");
 }
 
 /* Build the full control panel layout for the main application window. */

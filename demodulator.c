@@ -11,6 +11,25 @@ void demodulator_reset_fm(FmDemodState *state) {
     state->has_previous_sample = 0;
 }
 
+void demodulator_reset_lowpass(AudioLowPassState *state) {
+    if (!state) {
+        return;
+    }
+
+    state->previous_output = 0.0f;
+    state->has_previous_output = 0;
+}
+
+void demodulator_reset_fm_deemphasis(FmDeemphasisState *state) {
+    if (!state) {
+        return;
+    }
+
+    state->previous_input = 0.0f;
+    state->previous_output = 0.0f;
+    state->has_previous_sample = 0;
+}
+
 size_t demodulator_demodulate_fm(
     FmDemodState *state,
     const float complex *iq_samples,
@@ -92,4 +111,64 @@ void demodulator_normalize_audio(float *samples, size_t sample_count) {
     for (size_t index = 0; index < sample_count; index++) {
         samples[index] /= peak;
     }
+}
+
+void demodulator_apply_lowpass(AudioLowPassState *state, float *samples, size_t sample_count, float alpha) {
+    float previous_output;
+
+    if (!state || !samples || sample_count == 0) {
+        return;
+    }
+
+    if (alpha <= 0.0f) {
+        alpha = 0.0f;
+    }
+    if (alpha >= 1.0f) {
+        alpha = 1.0f;
+    }
+
+    previous_output = state->has_previous_output ? state->previous_output : samples[0];
+    for (size_t index = 0; index < sample_count; index++) {
+        previous_output += alpha * (samples[index] - previous_output);
+        samples[index] = previous_output;
+    }
+
+    state->previous_output = previous_output;
+    state->has_previous_output = 1;
+}
+
+void demodulator_apply_fm_deemphasis(
+    FmDeemphasisState *state,
+    float *samples,
+    size_t sample_count,
+    float sample_rate_hz,
+    float time_constant_us) {
+    float sample_interval_seconds;
+    float time_constant_seconds;
+    float alpha;
+    float previous_input;
+    float previous_output;
+
+    if (!state || !samples || sample_count == 0 || sample_rate_hz <= 0.0f || time_constant_us <= 0.0f) {
+        return;
+    }
+
+    sample_interval_seconds = 1.0f / sample_rate_hz;
+    time_constant_seconds = time_constant_us * 1.0e-6f;
+    alpha = expf(-sample_interval_seconds / time_constant_seconds);
+    previous_input = state->has_previous_sample ? state->previous_input : samples[0];
+    previous_output = state->has_previous_sample ? state->previous_output : samples[0];
+
+    for (size_t index = 0; index < sample_count; index++) {
+        float current_input = samples[index];
+        float current_output = alpha * previous_output + (1.0f - alpha) * current_input;
+
+        samples[index] = current_output;
+        previous_input = current_input;
+        previous_output = current_output;
+    }
+
+    state->previous_input = previous_input;
+    state->previous_output = previous_output;
+    state->has_previous_sample = 1;
 }

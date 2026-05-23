@@ -25,6 +25,9 @@ typedef enum {
  * demod_mode: user-selected audio demodulation mode.
  * audio_requested: true when the user has requested audio playback.
  * audio_active: true when an audio backend is actively consuming samples.
+ * audio_output_sample_rate_hz: speaker output sample rate used by the backend.
+ * audio_buffer_fill: current number of PCM samples queued for playback.
+ * audio_buffer_capacity: total PCM ring-buffer capacity.
  * device_count: number of RTL-SDR devices visible when the snapshot was taken.
  * center_freq_hz: currently configured tuner center frequency.
  * sample_rate_hz: currently configured sample rate.
@@ -41,6 +44,9 @@ typedef struct {
     bool audio_requested;
     bool audio_active;
     RadioDemodMode demod_mode;
+    uint32_t audio_output_sample_rate_hz;
+    size_t audio_buffer_fill;
+    size_t audio_buffer_capacity;
     uint32_t device_count;
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
@@ -95,15 +101,17 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
 /*
  * Update the selected demodulation mode.
  *
- * The first implementation only stores the user's selection so the UI and the
- * engine agree on which demodulator should be activated later.
+ * The engine uses this to switch between FM and AM demodulation while also
+ * resetting any per-mode audio conditioning state that should not leak across
+ * mode changes.
  */
 bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode, char *error_message, size_t error_message_size);
 
 /*
- * Toggle whether audio playback should be active once the backend exists.
+ * Toggle whether demodulated audio playback should be active.
  *
- * The current implementation stores user intent and surfaces it in the UI.
+ * When streaming is already active and the demod mode is not Off, this also
+ * starts or stops the live audio backend.
  */
 bool radio_engine_set_audio_requested(RadioEngine *engine, bool audio_requested, char *error_message, size_t error_message_size);
 
