@@ -102,6 +102,7 @@ static void draw_spectrum(GtkDrawingArea *area, cairo_t *cr, int width, int heig
     for (int grid = 0; grid <= 4; grid++) {
         double x = left_padding + ((double)grid / 4.0) * plot_width;
         double hz_offset = (((double)grid / 4.0) - 0.5) * (double)snapshot->sample_rate_hz;
+        double absolute_hz = (double)snapshot->center_freq_hz + hz_offset;
         char label[32];
 
         cairo_set_source_rgba(cr, 0.30, 0.36, 0.40, 0.5);
@@ -109,9 +110,9 @@ static void draw_spectrum(GtkDrawingArea *area, cairo_t *cr, int width, int heig
         cairo_line_to(cr, x, top_padding + plot_height);
         cairo_stroke(cr);
 
-        g_snprintf(label, sizeof(label), "%+.0f kHz", hz_offset / 1000.0);
+        g_snprintf(label, sizeof(label), "%.3f MHz", absolute_hz / 1000000.0);
         cairo_set_source_rgb(cr, 0.70, 0.74, 0.78);
-        cairo_move_to(cr, x - 20.0, height - 8.0);
+        cairo_move_to(cr, x - 28.0, height - 8.0);
         cairo_show_text(cr, label);
     }
 
