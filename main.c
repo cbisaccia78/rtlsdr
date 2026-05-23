@@ -32,6 +32,9 @@ typedef struct {
 } AppWidgets;
 
 static const SampleRateOption sample_rate_options[] = {
+    {256000U, "0.256 MS/s"},
+    {512000U, "0.512 MS/s"},
+    {768000U, "0.768 MS/s"},
     {1024000U, "1.024 MS/s"},
     {1536000U, "1.536 MS/s"},
     {2048000U, "2.048 MS/s"},
@@ -355,7 +358,7 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     gtk_label_set_xalign(GTK_LABEL(rate_label), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(demod_label), 0.0f);
 
-    widgets->center_freq_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(24000000.0, 1766000000.0, 100000.0));
+    widgets->center_freq_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(150000.0, 1766000000.0, 1000.0));
     gtk_spin_button_set_digits(widgets->center_freq_spin, 0);
     gtk_spin_button_set_value(widgets->center_freq_spin, 100000000.0);
 
@@ -363,7 +366,7 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
         gtk_string_list_append(sample_rate_model, sample_rate_options[index].label);
     }
     widgets->sample_rate_dropdown = GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(sample_rate_model), NULL));
-    gtk_drop_down_set_selected(widgets->sample_rate_dropdown, 2);
+    gtk_drop_down_set_selected(widgets->sample_rate_dropdown, 5);
     g_object_unref(sample_rate_model);
 
     for (size_t index = 0; index < G_N_ELEMENTS(demod_mode_options); index++) {
