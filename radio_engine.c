@@ -20,6 +20,7 @@
 #define AUDIO_OUTPUT_BUFFER_FRAMES 1024U
 #define AUDIO_OUTPUT_BUFFER_CAPACITY 16384U
 #define AUDIO_OUTPUT_SAMPLE_RATE 48000U
+#define TARGET_CHANNEL_SAMPLE_RATE 250000U
 #define MAX_AUDIO_SAMPLES_PER_BLOCK ((RADIO_SPECTRUM_BINS * AUDIO_OUTPUT_SAMPLE_RATE / MIN_RADIO_SAMPLE_RATE) + 8U)
 #define FM_AUDIO_LOWPASS_ALPHA 0.22f
 #define AM_AUDIO_LOWPASS_ALPHA 0.10f
@@ -78,6 +79,8 @@ typedef struct RadioEngine {
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
     uint32_t audio_sample_rate_hz;
+    uint32_t channel_sample_rate_hz;
+    uint32_t channel_decimation_factor;
     uint64_t total_samples;
     uint64_t audio_samples_generated;
     float audio_level;
@@ -94,6 +97,8 @@ typedef struct RadioEngine {
     float spectrum_db[RADIO_SPECTRUM_BINS];
     float window_sum;
     float audio_gain;
+    float complex channel_accumulator;
+    uint32_t channel_accumulator_count;
     double audio_resample_accumulator;
     bool running;
     bool spectrum_ready;
@@ -137,6 +142,24 @@ static void clear_spectrum_locked(RadioEngine *engine) {
     }
 }
 
+static void configure_channelizer(RadioEngine *engine) {
+    uint32_t decimation_factor;
+
+    if (!engine) {
+        return;
+    }
+
+    decimation_factor = (engine->sample_rate_hz + (TARGET_CHANNEL_SAMPLE_RATE / 2U)) / TARGET_CHANNEL_SAMPLE_RATE;
+    if (decimation_factor == 0U) {
+        decimation_factor = 1U;
+    }
+
+    engine->channel_decimation_factor = decimation_factor;
+    engine->channel_sample_rate_hz = engine->sample_rate_hz / decimation_factor;
+    engine->channel_accumulator = 0.0f + 0.0f * I;
+    engine->channel_accumulator_count = 0U;
+}
+
 static bool start_audio_backend(RadioEngine *engine, char *error_message, size_t error_message_size) {
     if (!engine) {
         copy_message(error_message, error_message_size, "Engine is not initialized.");
@@ -171,6 +194,7 @@ static bool start_audio_backend(RadioEngine *engine, char *error_message, size_t
     g_mutex_lock(&engine->lock);
     engine->audio_gain = 1.0f;
     engine->audio_active = true;
+    engine->audio_resample_accumulator = 0.0;
     g_mutex_unlock(&engine->lock);
     return true;
 }
@@ -195,10 +219,42 @@ static void stop_audio_backend(RadioEngine *engine) {
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
     demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
+    configure_channelizer(engine);
     g_mutex_unlock(&engine->lock);
 }
 
-static size_t resample_audio_block(RadioEngine *engine, const float *input, size_t input_count, float *output, size_t output_capacity) {
+static size_t resample_audio_block(
+    RadioEngine *engine,
+    uint32_t input_sample_rate_hz,
+    const float *input,
+    size_t input_count,
+    float *output,
+    size_t output_capacity) {
+    size_t output_count = 0;
+
+    if (!engine || !input || !output || input_count == 0 || output_capacity == 0 || input_sample_rate_hz == 0U) {
+        return 0;
+    }
+
+    for (size_t index = 0; index < input_count; index++) {
+        engine->audio_resample_accumulator += (double)engine->audio_sample_rate_hz;
+        if (engine->audio_resample_accumulator >= (double)input_sample_rate_hz) {
+            if (output_count < output_capacity) {
+                output[output_count++] = input[index];
+            }
+            engine->audio_resample_accumulator -= (double)input_sample_rate_hz;
+        }
+    }
+
+    return output_count;
+}
+
+static size_t channelize_iq_block(
+    RadioEngine *engine,
+    const float complex *input,
+    size_t input_count,
+    float complex *output,
+    size_t output_capacity) {
     size_t output_count = 0;
 
     if (!engine || !input || !output || input_count == 0 || output_capacity == 0) {
@@ -206,12 +262,16 @@ static size_t resample_audio_block(RadioEngine *engine, const float *input, size
     }
 
     for (size_t index = 0; index < input_count; index++) {
-        engine->audio_resample_accumulator += (double)engine->audio_sample_rate_hz;
-        if (engine->audio_resample_accumulator >= (double)engine->sample_rate_hz) {
+        engine->channel_accumulator += input[index];
+        engine->channel_accumulator_count += 1U;
+
+        if (engine->channel_accumulator_count >= engine->channel_decimation_factor) {
             if (output_count < output_capacity) {
-                output[output_count++] = input[index];
+                output[output_count++] = engine->channel_accumulator / (float)engine->channel_accumulator_count;
             }
-            engine->audio_resample_accumulator -= (double)engine->sample_rate_hz;
+
+            engine->channel_accumulator = 0.0f + 0.0f * I;
+            engine->channel_accumulator_count = 0U;
         }
     }
 
@@ -287,6 +347,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
     uint32_t num_samples = len / 2;
     float complex first_sample = 0.0f;
     float complex iq_block[RADIO_SPECTRUM_BINS];
+    float complex channel_iq_block[RADIO_SPECTRUM_BINS];
     float demod_audio_block[RADIO_SPECTRUM_BINS];
     float resampled_audio[MAX_AUDIO_SAMPLES_PER_BLOCK];
     float spectrum_db[RADIO_SPECTRUM_BINS];
@@ -341,19 +402,27 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
             }
 
             if (engine->audio_requested && engine->demod_mode != RADIO_DEMOD_MODE_OFF) {
+                size_t channel_iq_count = 0;
                 size_t audio_count = 0;
                 size_t resampled_count = 0;
+
+                channel_iq_count = channelize_iq_block(
+                    engine,
+                    iq_block,
+                    chunk_size,
+                    channel_iq_block,
+                    sizeof(channel_iq_block) / sizeof(channel_iq_block[0]));
 
                 if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
                     audio_count = demodulator_demodulate_fm(
                         &engine->fm_demod_state,
-                        iq_block,
-                        chunk_size,
+                        channel_iq_block,
+                        channel_iq_count,
                         demod_audio_block);
                 } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
                     audio_count = demodulator_demodulate_am(
-                        iq_block,
-                        chunk_size,
+                        channel_iq_block,
+                        channel_iq_count,
                         demod_audio_block);
                 }
 
@@ -361,6 +430,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
                     demodulator_remove_dc(demod_audio_block, audio_count);
                     resampled_count = resample_audio_block(
                         engine,
+                        engine->channel_sample_rate_hz,
                         demod_audio_block,
                         audio_count,
                         resampled_audio,
@@ -609,6 +679,7 @@ RadioEngine *radio_engine_new(void) {
     engine->audio_level = 0.0f;
     engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
+    configure_channelizer(engine);
     demodulator_reset_fm(&engine->fm_demod_state);
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
@@ -674,6 +745,7 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
     engine->sample_rate_hz = sample_rate_hz;
     engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
+    configure_channelizer(engine);
     if (engine->running) {
         set_status_locked(engine, "Sample rate queued. Stop and restart to apply %.3f MS/s.", sample_rate_hz / 1000000.0);
         g_mutex_unlock(&engine->lock);
@@ -774,6 +846,7 @@ bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_
     engine->spectrum_ready = false;
     engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
+    configure_channelizer(engine);
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
     demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
