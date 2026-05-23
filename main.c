@@ -10,12 +10,18 @@ typedef struct {
 } SampleRateOption;
 
 typedef struct {
+    RadioDemodMode value;
+    const char *label;
+} DemodModeOption;
+
+typedef struct {
     GtkApplication *application;
     GtkLabel *status_label;
     GtkLabel *stats_label;
     GtkDrawingArea *spectrum_area;
     GtkSpinButton *center_freq_spin;
     GtkDropDown *sample_rate_dropdown;
+    GtkDropDown *demod_mode_dropdown;
     GtkButton *apply_button;
     GtkButton *start_button;
     GtkButton *stop_button;
@@ -32,6 +38,12 @@ static const SampleRateOption sample_rate_options[] = {
     {2560000U, "2.560 MS/s"}
 };
 
+static const DemodModeOption demod_mode_options[] = {
+    {RADIO_DEMOD_MODE_OFF, "Off"},
+    {RADIO_DEMOD_MODE_FM, "FM"},
+    {RADIO_DEMOD_MODE_AM, "AM"}
+};
+
 /* Read the sample-rate dropdown and map it back to a concrete Hz value. */
 static uint32_t selected_sample_rate(AppWidgets *widgets) {
     guint selected = gtk_drop_down_get_selected(widgets->sample_rate_dropdown);
@@ -41,6 +53,26 @@ static uint32_t selected_sample_rate(AppWidgets *widgets) {
     }
 
     return sample_rate_options[selected].value;
+}
+
+static RadioDemodMode selected_demod_mode(AppWidgets *widgets) {
+    guint selected = gtk_drop_down_get_selected(widgets->demod_mode_dropdown);
+
+    if (selected >= G_N_ELEMENTS(demod_mode_options)) {
+        return RADIO_DEMOD_MODE_OFF;
+    }
+
+    return demod_mode_options[selected].value;
+}
+
+static const char *demod_mode_label(RadioDemodMode demod_mode) {
+    for (size_t index = 0; index < G_N_ELEMENTS(demod_mode_options); index++) {
+        if (demod_mode_options[index].value == demod_mode) {
+            return demod_mode_options[index].label;
+        }
+    }
+
+    return "Off";
 }
 
 /* Push a short status message into the GTK status label. */
@@ -174,10 +206,11 @@ static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapsho
     }
 
     stats = g_strdup_printf(
-        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
+        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
         snapshot->device_count,
         snapshot->center_freq_hz / 1000000.0,
         snapshot->sample_rate_hz / 1000000.0,
+        demod_mode_label(snapshot->demod_mode),
         (unsigned long long)snapshot->total_samples,
         snapshot->last_i,
         snapshot->last_q,
@@ -198,6 +231,7 @@ static gboolean refresh_ui(gpointer user_data) {
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->start_button), !widgets->snapshot.running);
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->stop_button), widgets->snapshot.running);
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->sample_rate_dropdown), !widgets->snapshot.running);
+    gtk_widget_set_sensitive(GTK_WIDGET(widgets->demod_mode_dropdown), TRUE);
     gtk_widget_queue_draw(GTK_WIDGET(widgets->spectrum_area));
 
     return G_SOURCE_CONTINUE;
@@ -208,6 +242,7 @@ static gboolean apply_settings(AppWidgets *widgets, gboolean show_partial_messag
     char message[160];
     uint32_t center_freq_hz = (uint32_t)gtk_spin_button_get_value_as_int(widgets->center_freq_spin);
     uint32_t sample_rate_hz = selected_sample_rate(widgets);
+    RadioDemodMode demod_mode = selected_demod_mode(widgets);
 
     if (!radio_engine_set_center_freq(widgets->engine, center_freq_hz, message, sizeof(message))) {
         set_status_text(widgets, message);
@@ -218,6 +253,11 @@ static gboolean apply_settings(AppWidgets *widgets, gboolean show_partial_messag
         if (show_partial_message) {
             set_status_text(widgets, message);
         }
+        return FALSE;
+    }
+
+    if (!radio_engine_set_demod_mode(widgets->engine, demod_mode, message, sizeof(message))) {
+        set_status_text(widgets, message);
         return FALSE;
     }
 
@@ -269,10 +309,12 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     GtkWidget *button_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget *freq_label = gtk_label_new("Center frequency (Hz)");
     GtkWidget *rate_label = gtk_label_new("Sample rate");
+    GtkWidget *demod_label = gtk_label_new("Demod mode");
     GtkWidget *spectrum_frame = gtk_frame_new("Spectrum analyzer");
     GtkWidget *stats_frame = gtk_frame_new("Radio state");
     GtkWidget *status_frame = gtk_frame_new("Status");
     GtkStringList *sample_rate_model = gtk_string_list_new(NULL);
+    GtkStringList *demod_mode_model = gtk_string_list_new(NULL);
 
     gtk_widget_set_margin_top(box, 16);
     gtk_widget_set_margin_bottom(box, 16);
@@ -282,6 +324,7 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
     gtk_label_set_xalign(GTK_LABEL(freq_label), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(rate_label), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(demod_label), 0.0f);
 
     widgets->center_freq_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(24000000.0, 1766000000.0, 100000.0));
     gtk_spin_button_set_digits(widgets->center_freq_spin, 0);
@@ -294,10 +337,19 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     gtk_drop_down_set_selected(widgets->sample_rate_dropdown, 2);
     g_object_unref(sample_rate_model);
 
+    for (size_t index = 0; index < G_N_ELEMENTS(demod_mode_options); index++) {
+        gtk_string_list_append(demod_mode_model, demod_mode_options[index].label);
+    }
+    widgets->demod_mode_dropdown = GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(demod_mode_model), NULL));
+    gtk_drop_down_set_selected(widgets->demod_mode_dropdown, 0);
+    g_object_unref(demod_mode_model);
+
     gtk_grid_attach(GTK_GRID(grid), freq_label, 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(widgets->center_freq_spin), 1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), rate_label, 0, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(widgets->sample_rate_dropdown), 1, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), demod_label, 0, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(widgets->demod_mode_dropdown), 1, 2, 1, 1);
 
     widgets->apply_button = GTK_BUTTON(gtk_button_new_with_label("Apply settings"));
     widgets->start_button = GTK_BUTTON(gtk_button_new_with_label("Start"));

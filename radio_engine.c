@@ -41,6 +41,7 @@
  * spectrum_db: latest FFT magnitudes in dB, shifted so DC is centered.
  * running: true while async streaming is active.
  * spectrum_ready: true after at least one FFT frame has been published.
+ * demod_mode: user-selected audio demodulation mode.
  * stop_requested: true after shutdown has been requested by the caller.
  * status: latest human-readable engine status message.
  */
@@ -66,6 +67,7 @@ typedef struct RadioEngine {
     float window_sum;
     bool running;
     bool spectrum_ready;
+    RadioDemodMode demod_mode;
     bool stop_requested;
     char status[160];
 } RadioEngine;
@@ -336,6 +338,7 @@ RadioEngine *radio_engine_new(void) {
     }
     engine->center_freq_hz = DEFAULT_CENTER_FREQ;
     engine->sample_rate_hz = DEFAULT_SAMPLE_RATE;
+    engine->demod_mode = RADIO_DEMOD_MODE_OFF;
     engine->device_count = rtlsdr_get_device_count();
     snprintf(engine->status, sizeof(engine->status), "Ready.");
     return engine;
@@ -404,6 +407,21 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
     g_mutex_unlock(&engine->lock);
 
     copy_message(error_message, error_message_size, "Sample rate updated.");
+    return true;
+}
+
+/* Store the selected demodulation mode for later audio pipeline activation. */
+bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode, char *error_message, size_t error_message_size) {
+    if (!engine) {
+        copy_message(error_message, error_message_size, "Engine is not initialized.");
+        return false;
+    }
+
+    g_mutex_lock(&engine->lock);
+    engine->demod_mode = demod_mode;
+    g_mutex_unlock(&engine->lock);
+
+    copy_message(error_message, error_message_size, "Demod mode updated.");
     return true;
 }
 
@@ -483,6 +501,7 @@ void radio_engine_get_snapshot(RadioEngine *engine, RadioEngineSnapshot *snapsho
     g_mutex_lock(&engine->lock);
     snapshot->running = engine->running;
     snapshot->spectrum_ready = engine->spectrum_ready;
+    snapshot->demod_mode = engine->demod_mode;
     snapshot->device_count = engine->device_count;
     snapshot->center_freq_hz = engine->center_freq_hz;
     snapshot->sample_rate_hz = engine->sample_rate_hz;

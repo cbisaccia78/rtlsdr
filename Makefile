@@ -10,8 +10,8 @@ LDFLAGS=$(GTK_LIBS) $(RTLSDR_LIBS) $(ACCELERATE_LIBS)
 
 all: radio_gui
 
-radio_gui: main.c radio_engine.c radio_engine.h
-	$(CC) $(CFLAGS) -o radio_gui main.c radio_engine.c $(LDFLAGS)
+radio_gui: main.c radio_engine.c radio_engine.h demodulator.c demodulator.h
+	$(CC) $(CFLAGS) -o radio_gui main.c radio_engine.c demodulator.c $(LDFLAGS)
 
 clean:
 	rm -f radio_gui

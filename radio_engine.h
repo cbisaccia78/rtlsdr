@@ -8,6 +8,12 @@
 /* Opaque radio controller that owns device state, worker thread, and FFT buffers. */
 typedef struct RadioEngine RadioEngine;
 
+typedef enum {
+    RADIO_DEMOD_MODE_OFF = 0,
+    RADIO_DEMOD_MODE_FM,
+    RADIO_DEMOD_MODE_AM
+} RadioDemodMode;
+
 /* Number of FFT bins exposed to the GTK spectrum display. */
 #define RADIO_SPECTRUM_BINS 1024U
 
@@ -16,6 +22,7 @@ typedef struct RadioEngine RadioEngine;
  *
  * running: true while the async RTL-SDR read loop is active.
  * spectrum_ready: true after at least one FFT frame has been produced.
+ * demod_mode: user-selected audio demodulation mode.
  * device_count: number of RTL-SDR devices visible when the snapshot was taken.
  * center_freq_hz: currently configured tuner center frequency.
  * sample_rate_hz: currently configured sample rate.
@@ -27,6 +34,7 @@ typedef struct RadioEngine RadioEngine;
 typedef struct {
     bool running;
     bool spectrum_ready;
+    RadioDemodMode demod_mode;
     uint32_t device_count;
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
@@ -75,6 +83,14 @@ bool radio_engine_set_center_freq(RadioEngine *engine, uint32_t center_freq_hz, 
  * that a stop/start cycle is required before the hardware setting changes.
  */
 bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, char *error_message, size_t error_message_size);
+
+/*
+ * Update the selected demodulation mode.
+ *
+ * The first implementation only stores the user's selection so the UI and the
+ * engine agree on which demodulator should be activated later.
+ */
+bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode, char *error_message, size_t error_message_size);
 
 /*
  * Start the RTL-SDR worker thread for the selected device index.
