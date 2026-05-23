@@ -22,6 +22,7 @@ typedef struct {
     GtkSpinButton *center_freq_spin;
     GtkDropDown *sample_rate_dropdown;
     GtkDropDown *demod_mode_dropdown;
+    GtkButton *audio_button;
     GtkButton *apply_button;
     GtkButton *start_button;
     GtkButton *stop_button;
@@ -43,6 +44,10 @@ static const DemodModeOption demod_mode_options[] = {
     {RADIO_DEMOD_MODE_FM, "FM"},
     {RADIO_DEMOD_MODE_AM, "AM"}
 };
+
+static const char *audio_button_label(gboolean audio_requested) {
+    return audio_requested ? "Disable audio" : "Enable audio";
+}
 
 /* Read the sample-rate dropdown and map it back to a concrete Hz value. */
 static uint32_t selected_sample_rate(AppWidgets *widgets) {
@@ -206,11 +211,13 @@ static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapsho
     }
 
     stats = g_strdup_printf(
-        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
+        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nAudio requested: %s\nAudio active: %s\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
         snapshot->device_count,
         snapshot->center_freq_hz / 1000000.0,
         snapshot->sample_rate_hz / 1000000.0,
         demod_mode_label(snapshot->demod_mode),
+        snapshot->audio_requested ? "yes" : "no",
+        snapshot->audio_active ? "yes" : "no",
         (unsigned long long)snapshot->total_samples,
         snapshot->last_i,
         snapshot->last_q,
@@ -232,6 +239,7 @@ static gboolean refresh_ui(gpointer user_data) {
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->stop_button), widgets->snapshot.running);
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->sample_rate_dropdown), !widgets->snapshot.running);
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->demod_mode_dropdown), TRUE);
+    gtk_button_set_label(widgets->audio_button, audio_button_label(widgets->snapshot.audio_requested));
     gtk_widget_queue_draw(GTK_WIDGET(widgets->spectrum_area));
 
     return G_SOURCE_CONTINUE;
@@ -302,6 +310,22 @@ static void on_stop_clicked(GtkButton *button, gpointer user_data) {
     set_status_text(widgets, "Stopping stream...");
 }
 
+/* GTK signal handler that toggles future audio playback intent. */
+static void on_audio_clicked(GtkButton *button, gpointer user_data) {
+    AppWidgets *widgets = user_data;
+    char message[160];
+    gboolean audio_requested = !widgets->snapshot.audio_requested;
+
+    (void)button;
+    if (!radio_engine_set_audio_requested(widgets->engine, audio_requested, message, sizeof(message))) {
+        set_status_text(widgets, message);
+        return;
+    }
+
+    gtk_button_set_label(widgets->audio_button, audio_button_label(audio_requested));
+    set_status_text(widgets, audio_requested ? "Audio playback requested. Backend not connected yet." : "Audio playback disabled.");
+}
+
 /* Build the full control panel layout for the main application window. */
 static GtkWidget *build_controls(AppWidgets *widgets) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -354,15 +378,18 @@ static GtkWidget *build_controls(AppWidgets *widgets) {
     widgets->apply_button = GTK_BUTTON(gtk_button_new_with_label("Apply settings"));
     widgets->start_button = GTK_BUTTON(gtk_button_new_with_label("Start"));
     widgets->stop_button = GTK_BUTTON(gtk_button_new_with_label("Stop"));
+    widgets->audio_button = GTK_BUTTON(gtk_button_new_with_label(audio_button_label(FALSE)));
     gtk_widget_set_sensitive(GTK_WIDGET(widgets->stop_button), FALSE);
 
     g_signal_connect(widgets->apply_button, "clicked", G_CALLBACK(on_apply_clicked), widgets);
     g_signal_connect(widgets->start_button, "clicked", G_CALLBACK(on_start_clicked), widgets);
     g_signal_connect(widgets->stop_button, "clicked", G_CALLBACK(on_stop_clicked), widgets);
+    g_signal_connect(widgets->audio_button, "clicked", G_CALLBACK(on_audio_clicked), widgets);
 
     gtk_box_append(GTK_BOX(button_row), GTK_WIDGET(widgets->apply_button));
     gtk_box_append(GTK_BOX(button_row), GTK_WIDGET(widgets->start_button));
     gtk_box_append(GTK_BOX(button_row), GTK_WIDGET(widgets->stop_button));
+    gtk_box_append(GTK_BOX(button_row), GTK_WIDGET(widgets->audio_button));
 
     widgets->spectrum_area = GTK_DRAWING_AREA(gtk_drawing_area_new());
     gtk_widget_set_size_request(GTK_WIDGET(widgets->spectrum_area), 760, 280);

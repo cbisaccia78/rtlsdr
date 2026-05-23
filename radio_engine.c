@@ -42,6 +42,8 @@
  * running: true while async streaming is active.
  * spectrum_ready: true after at least one FFT frame has been published.
  * demod_mode: user-selected audio demodulation mode.
+ * audio_requested: whether the user has asked to start demodulated audio.
+ * audio_active: whether a concrete audio backend is currently active.
  * stop_requested: true after shutdown has been requested by the caller.
  * status: latest human-readable engine status message.
  */
@@ -68,6 +70,8 @@ typedef struct RadioEngine {
     bool running;
     bool spectrum_ready;
     RadioDemodMode demod_mode;
+    bool audio_requested;
+    bool audio_active;
     bool stop_requested;
     char status[160];
 } RadioEngine;
@@ -339,6 +343,8 @@ RadioEngine *radio_engine_new(void) {
     engine->center_freq_hz = DEFAULT_CENTER_FREQ;
     engine->sample_rate_hz = DEFAULT_SAMPLE_RATE;
     engine->demod_mode = RADIO_DEMOD_MODE_OFF;
+    engine->audio_requested = false;
+    engine->audio_active = false;
     engine->device_count = rtlsdr_get_device_count();
     snprintf(engine->status, sizeof(engine->status), "Ready.");
     return engine;
@@ -425,6 +431,22 @@ bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode,
     return true;
 }
 
+/* Store whether the user wants the future demodulated audio path to run. */
+bool radio_engine_set_audio_requested(RadioEngine *engine, bool audio_requested, char *error_message, size_t error_message_size) {
+    if (!engine) {
+        copy_message(error_message, error_message_size, "Engine is not initialized.");
+        return false;
+    }
+
+    g_mutex_lock(&engine->lock);
+    engine->audio_requested = audio_requested;
+    engine->audio_active = false;
+    g_mutex_unlock(&engine->lock);
+
+    copy_message(error_message, error_message_size, audio_requested ? "Audio requested." : "Audio disabled.");
+    return true;
+}
+
 /* Spawn the RTL-SDR worker thread using the engine's current configuration. */
 bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_message, size_t error_message_size) {
     GThread *thread;
@@ -501,6 +523,8 @@ void radio_engine_get_snapshot(RadioEngine *engine, RadioEngineSnapshot *snapsho
     g_mutex_lock(&engine->lock);
     snapshot->running = engine->running;
     snapshot->spectrum_ready = engine->spectrum_ready;
+    snapshot->audio_requested = engine->audio_requested;
+    snapshot->audio_active = engine->audio_active;
     snapshot->demod_mode = engine->demod_mode;
     snapshot->device_count = engine->device_count;
     snapshot->center_freq_hz = engine->center_freq_hz;

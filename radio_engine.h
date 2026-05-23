@@ -23,6 +23,8 @@ typedef enum {
  * running: true while the async RTL-SDR read loop is active.
  * spectrum_ready: true after at least one FFT frame has been produced.
  * demod_mode: user-selected audio demodulation mode.
+ * audio_requested: true when the user has requested audio playback.
+ * audio_active: true when an audio backend is actively consuming samples.
  * device_count: number of RTL-SDR devices visible when the snapshot was taken.
  * center_freq_hz: currently configured tuner center frequency.
  * sample_rate_hz: currently configured sample rate.
@@ -34,6 +36,8 @@ typedef enum {
 typedef struct {
     bool running;
     bool spectrum_ready;
+    bool audio_requested;
+    bool audio_active;
     RadioDemodMode demod_mode;
     uint32_t device_count;
     uint32_t center_freq_hz;
@@ -91,6 +95,13 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
  * engine agree on which demodulator should be activated later.
  */
 bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode, char *error_message, size_t error_message_size);
+
+/*
+ * Toggle whether audio playback should be active once the backend exists.
+ *
+ * The current implementation stores user intent and surfaces it in the UI.
+ */
+bool radio_engine_set_audio_requested(RadioEngine *engine, bool audio_requested, char *error_message, size_t error_message_size);
 
 /*
  * Start the RTL-SDR worker thread for the selected device index.
