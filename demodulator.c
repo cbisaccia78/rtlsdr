@@ -30,6 +30,14 @@ void demodulator_reset_fm_deemphasis(FmDeemphasisState *state) {
     state->has_previous_sample = 0;
 }
 
+void demodulator_reset_am_agc(AmAgcState *state) {
+    if (!state) {
+        return;
+    }
+
+    state->gain = 1.0f;
+}
+
 size_t demodulator_demodulate_fm(
     FmDemodState *state,
     const float complex *iq_samples,
@@ -171,4 +179,43 @@ void demodulator_apply_fm_deemphasis(
     state->previous_input = previous_input;
     state->previous_output = previous_output;
     state->has_previous_sample = 1;
+}
+
+void demodulator_apply_am_agc(
+    AmAgcState *state,
+    float *samples,
+    size_t sample_count,
+    float target_level,
+    float attack_alpha,
+    float release_alpha) {
+    if (!state || !samples || sample_count == 0) {
+        return;
+    }
+
+    if (target_level <= 0.0f) {
+        target_level = 0.2f;
+    }
+
+    for (size_t index = 0; index < sample_count; index++) {
+        float magnitude = fabsf(samples[index]);
+        float desired_gain;
+        float alpha;
+
+        if (magnitude < 1.0e-4f) {
+            desired_gain = state->gain;
+        } else {
+            desired_gain = target_level / magnitude;
+        }
+
+        alpha = desired_gain < state->gain ? attack_alpha : release_alpha;
+        if (alpha < 0.0f) {
+            alpha = 0.0f;
+        }
+        if (alpha > 1.0f) {
+            alpha = 1.0f;
+        }
+
+        state->gain += alpha * (desired_gain - state->gain);
+        samples[index] *= state->gain;
+    }
 }

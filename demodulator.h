@@ -26,6 +26,11 @@ typedef struct {
     int has_previous_sample;
 } FmDeemphasisState;
 
+/* Simple AM audio AGC state with smoothed gain tracking. */
+typedef struct {
+    float gain;
+} AmAgcState;
+
 /* Reset the FM demodulator state before processing a new stream. */
 void demodulator_reset_fm(FmDemodState *state);
 
@@ -34,6 +39,9 @@ void demodulator_reset_lowpass(AudioLowPassState *state);
 
 /* Reset the FM deemphasis state before starting a new audio stream. */
 void demodulator_reset_fm_deemphasis(FmDeemphasisState *state);
+
+/* Reset the AM audio AGC state before starting a new stream or mode. */
+void demodulator_reset_am_agc(AmAgcState *state);
 
 /*
  * Convert a block of complex IQ samples into FM-demodulated audio.
@@ -72,5 +80,14 @@ void demodulator_apply_fm_deemphasis(
     size_t sample_count,
     float sample_rate_hz,
     float time_constant_us);
+
+/* Apply simple gain control to AM audio in place. */
+void demodulator_apply_am_agc(
+    AmAgcState *state,
+    float *samples,
+    size_t sample_count,
+    float target_level,
+    float attack_alpha,
+    float release_alpha);
 
 #endif
