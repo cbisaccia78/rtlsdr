@@ -16,6 +16,7 @@
 
 #define DEFAULT_SAMPLE_RATE 2048000U
 #define DEFAULT_CENTER_FREQ 100000000U
+#define TUNER_MIN_FREQ_HZ 24000000U
 #define MIN_RADIO_SAMPLE_RATE 256000U
 #define AUDIO_OUTPUT_BUFFER_FRAMES 1024U
 #define AUDIO_OUTPUT_BUFFER_CAPACITY 16384U
@@ -548,6 +549,7 @@ static gpointer radio_engine_thread(gpointer user_data) {
     uint32_t device_index;
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
+    int direct_sampling_mode;
     int result;
 
     g_mutex_lock(&engine->lock);
@@ -584,6 +586,21 @@ static gpointer radio_engine_thread(gpointer user_data) {
     engine->dev = dev;
     g_mutex_unlock(&engine->lock);
 
+    direct_sampling_mode = center_freq_hz < TUNER_MIN_FREQ_HZ ? 2 : 0;
+    result = rtlsdr_set_direct_sampling(dev, direct_sampling_mode);
+    if (result < 0) {
+        g_mutex_lock(&engine->lock);
+        set_status_locked(
+            engine,
+            direct_sampling_mode != 0 ? "Failed to enable direct sampling for %.3f MHz." : "Failed to disable direct sampling.",
+            center_freq_hz / 1000000.0);
+        engine->dev = NULL;
+        engine->thread = NULL;
+        g_mutex_unlock(&engine->lock);
+        rtlsdr_close(dev);
+        return NULL;
+    }
+
     result = rtlsdr_set_sample_rate(dev, sample_rate_hz);
     if (result < 0) {
         g_mutex_lock(&engine->lock);
@@ -606,15 +623,17 @@ static gpointer radio_engine_thread(gpointer user_data) {
         return NULL;
     }
 
-    result = rtlsdr_set_tuner_gain_mode(dev, 0);
-    if (result < 0) {
-        g_mutex_lock(&engine->lock);
-        set_status_locked(engine, "Failed to enable automatic gain control.");
-        engine->dev = NULL;
-        engine->thread = NULL;
-        g_mutex_unlock(&engine->lock);
-        rtlsdr_close(dev);
-        return NULL;
+    if (direct_sampling_mode == 0) {
+        result = rtlsdr_set_tuner_gain_mode(dev, 0);
+        if (result < 0) {
+            g_mutex_lock(&engine->lock);
+            set_status_locked(engine, "Failed to enable automatic gain control.");
+            engine->dev = NULL;
+            engine->thread = NULL;
+            g_mutex_unlock(&engine->lock);
+            rtlsdr_close(dev);
+            return NULL;
+        }
     }
 
     result = rtlsdr_reset_buffer(dev);
@@ -630,7 +649,11 @@ static gpointer radio_engine_thread(gpointer user_data) {
 
     g_mutex_lock(&engine->lock);
     engine->running = true;
-    set_status_locked(engine, "Streaming %.3f MHz at %.3f MS/s.", center_freq_hz / 1000000.0, sample_rate_hz / 1000000.0);
+    set_status_locked(
+        engine,
+        direct_sampling_mode != 0 ? "Streaming %.3f MHz at %.3f MS/s using direct sampling." : "Streaming %.3f MHz at %.3f MS/s.",
+        center_freq_hz / 1000000.0,
+        sample_rate_hz / 1000000.0);
     g_mutex_unlock(&engine->lock);
 
     if (engine->audio_requested && engine->demod_mode != RADIO_DEMOD_MODE_OFF) {
