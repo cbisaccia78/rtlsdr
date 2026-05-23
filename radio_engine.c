@@ -24,6 +24,9 @@
 #define FM_AUDIO_LOWPASS_ALPHA 0.22f
 #define AM_AUDIO_LOWPASS_ALPHA 0.10f
 #define FM_DEEMPHASIS_TIME_CONSTANT_US 75.0f
+#define AUDIO_TARGET_PEAK 0.85f
+#define AUDIO_GAIN_ATTACK_ALPHA 0.35f
+#define AUDIO_GAIN_RELEASE_ALPHA 0.04f
 #define ADC_CENTER 127.4f
 #define ADC_SCALE 128.0f
 #define SPECTRUM_FLOOR_DB -120.0f
@@ -90,6 +93,7 @@ typedef struct RadioEngine {
     float spectrum_power[RADIO_SPECTRUM_BINS];
     float spectrum_db[RADIO_SPECTRUM_BINS];
     float window_sum;
+    float audio_gain;
     double audio_resample_accumulator;
     bool running;
     bool spectrum_ready;
@@ -165,6 +169,7 @@ static bool start_audio_backend(RadioEngine *engine, char *error_message, size_t
     }
 
     g_mutex_lock(&engine->lock);
+    engine->audio_gain = 1.0f;
     engine->audio_active = true;
     g_mutex_unlock(&engine->lock);
     return true;
@@ -185,6 +190,7 @@ static void stop_audio_backend(RadioEngine *engine) {
     g_mutex_lock(&engine->lock);
     engine->audio_active = false;
     engine->audio_level = 0.0f;
+    engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
@@ -212,6 +218,49 @@ static size_t resample_audio_block(RadioEngine *engine, const float *input, size
     return output_count;
 }
 
+static float compute_audio_level(const float *samples, size_t sample_count);
+
+static float apply_audio_gain_control(RadioEngine *engine, float *samples, size_t sample_count) {
+    float peak = 0.0f;
+    float target_gain;
+    float smoothing_alpha;
+
+    if (!engine || !samples || sample_count == 0) {
+        return 0.0f;
+    }
+
+    for (size_t index = 0; index < sample_count; index++) {
+        float magnitude = fabsf(samples[index]);
+
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
+
+    if (peak < 1.0e-4f) {
+        target_gain = engine->audio_gain;
+    } else {
+        target_gain = AUDIO_TARGET_PEAK / peak;
+    }
+
+    smoothing_alpha = target_gain < engine->audio_gain ? AUDIO_GAIN_ATTACK_ALPHA : AUDIO_GAIN_RELEASE_ALPHA;
+    engine->audio_gain += smoothing_alpha * (target_gain - engine->audio_gain);
+
+    for (size_t index = 0; index < sample_count; index++) {
+        float scaled = samples[index] * engine->audio_gain;
+
+        if (scaled > 1.0f) {
+            scaled = 1.0f;
+        } else if (scaled < -1.0f) {
+            scaled = -1.0f;
+        }
+
+        samples[index] = scaled;
+    }
+
+    return compute_audio_level(samples, sample_count);
+}
+
 static float compute_audio_level(const float *samples, size_t sample_count) {
     float sum_squares = 0.0f;
 
@@ -237,11 +286,12 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
     RadioEngine *engine = ctx;
     uint32_t num_samples = len / 2;
     float complex first_sample = 0.0f;
+    float complex iq_block[RADIO_SPECTRUM_BINS];
+    float demod_audio_block[RADIO_SPECTRUM_BINS];
     float resampled_audio[MAX_AUDIO_SAMPLES_PER_BLOCK];
     float spectrum_db[RADIO_SPECTRUM_BINS];
     float spectrum_power[RADIO_SPECTRUM_BINS];
-    size_t audio_count = 0;
-    size_t resampled_count = 0;
+    size_t total_resampled_count = 0;
     float audio_level = 0.0f;
     bool audio_active = false;
     bool spectrum_ready = false;
@@ -253,71 +303,90 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
     }
 
     if (num_samples >= RADIO_SPECTRUM_BINS) {
-        float mean_i = 0.0f;
-        float mean_q = 0.0f;
         float normalization = engine->window_sum * engine->window_sum;
 
-        for (uint32_t index = 0; index < RADIO_SPECTRUM_BINS; index++) {
-            mean_i += ((float)buf[2 * index] - ADC_CENTER) / ADC_SCALE;
-            mean_q += ((float)buf[2 * index + 1] - ADC_CENTER) / ADC_SCALE;
-        }
+        for (uint32_t chunk_start = 0; chunk_start < num_samples; chunk_start += RADIO_SPECTRUM_BINS) {
+            uint32_t chunk_size = num_samples - chunk_start;
+            float mean_i = 0.0f;
+            float mean_q = 0.0f;
 
-        mean_i /= (float)RADIO_SPECTRUM_BINS;
-        mean_q /= (float)RADIO_SPECTRUM_BINS;
-
-        for (uint32_t index = 0; index < RADIO_SPECTRUM_BINS; index++) {
-            float i_float = (((float)buf[2 * index] - ADC_CENTER) / ADC_SCALE) - mean_i;
-            float q_float = (((float)buf[2 * index + 1] - ADC_CENTER) / ADC_SCALE) - mean_q;
-            float window = engine->window[index];
-
-            engine->iq_preview[index] = i_float + q_float * I;
-            engine->fft_real_in[index] = i_float * window;
-            engine->fft_imag_in[index] = q_float * window;
-        }
-
-        if (engine->audio_requested && engine->demod_mode != RADIO_DEMOD_MODE_OFF) {
-            if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
-                audio_count = demodulator_demodulate_fm(
-                    &engine->fm_demod_state,
-                    engine->iq_preview,
-                    RADIO_SPECTRUM_BINS,
-                    engine->demod_audio_preview);
-            } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
-                audio_count = demodulator_demodulate_am(
-                    engine->iq_preview,
-                    RADIO_SPECTRUM_BINS,
-                    engine->demod_audio_preview);
+            if (chunk_size > RADIO_SPECTRUM_BINS) {
+                chunk_size = RADIO_SPECTRUM_BINS;
             }
 
-            if (audio_count > 0) {
-                demodulator_remove_dc(engine->demod_audio_preview, audio_count);
-                resampled_count = resample_audio_block(
-                    engine,
-                    engine->demod_audio_preview,
-                    audio_count,
-                    resampled_audio,
-                    sizeof(resampled_audio) / sizeof(resampled_audio[0]));
+            for (uint32_t index = 0; index < chunk_size; index++) {
+                uint32_t sample_index = chunk_start + index;
 
-                if (resampled_count > 0) {
-                    if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
-                        demodulator_apply_lowpass(&engine->fm_audio_lowpass_state, resampled_audio, resampled_count, FM_AUDIO_LOWPASS_ALPHA);
-                        demodulator_apply_fm_deemphasis(
-                            &engine->fm_deemphasis_state,
-                            resampled_audio,
-                            resampled_count,
-                            (float)engine->audio_sample_rate_hz,
-                            FM_DEEMPHASIS_TIME_CONSTANT_US);
-                    } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
-                        demodulator_apply_lowpass(&engine->am_audio_lowpass_state, resampled_audio, resampled_count, AM_AUDIO_LOWPASS_ALPHA);
-                    }
+                mean_i += ((float)buf[2 * sample_index] - ADC_CENTER) / ADC_SCALE;
+                mean_q += ((float)buf[2 * sample_index + 1] - ADC_CENTER) / ADC_SCALE;
+            }
 
-                    demodulator_normalize_audio(resampled_audio, resampled_count);
-                    audio_level = compute_audio_level(resampled_audio, resampled_count);
+            mean_i /= (float)chunk_size;
+            mean_q /= (float)chunk_size;
+
+            for (uint32_t index = 0; index < chunk_size; index++) {
+                uint32_t sample_index = chunk_start + index;
+                float i_float = (((float)buf[2 * sample_index] - ADC_CENTER) / ADC_SCALE) - mean_i;
+                float q_float = (((float)buf[2 * sample_index + 1] - ADC_CENTER) / ADC_SCALE) - mean_q;
+
+                iq_block[index] = i_float + q_float * I;
+
+                if (chunk_start == 0U) {
+                    float window = engine->window[index];
+
+                    engine->iq_preview[index] = iq_block[index];
+                    engine->fft_real_in[index] = i_float * window;
+                    engine->fft_imag_in[index] = q_float * window;
+                }
+            }
+
+            if (engine->audio_requested && engine->demod_mode != RADIO_DEMOD_MODE_OFF) {
+                size_t audio_count = 0;
+                size_t resampled_count = 0;
+
+                if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
+                    audio_count = demodulator_demodulate_fm(
+                        &engine->fm_demod_state,
+                        iq_block,
+                        chunk_size,
+                        demod_audio_block);
+                } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
+                    audio_count = demodulator_demodulate_am(
+                        iq_block,
+                        chunk_size,
+                        demod_audio_block);
                 }
 
-                if (engine->audio_requested && engine->audio_output && audio_output_mac_is_running(engine->audio_output) && resampled_count > 0) {
-                    audio_buffer_push(engine->audio_buffer, resampled_audio, resampled_count);
-                    audio_active = true;
+                if (audio_count > 0) {
+                    demodulator_remove_dc(demod_audio_block, audio_count);
+                    resampled_count = resample_audio_block(
+                        engine,
+                        demod_audio_block,
+                        audio_count,
+                        resampled_audio,
+                        sizeof(resampled_audio) / sizeof(resampled_audio[0]));
+
+                    if (resampled_count > 0) {
+                        if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
+                            demodulator_apply_lowpass(&engine->fm_audio_lowpass_state, resampled_audio, resampled_count, FM_AUDIO_LOWPASS_ALPHA);
+                            demodulator_apply_fm_deemphasis(
+                                &engine->fm_deemphasis_state,
+                                resampled_audio,
+                                resampled_count,
+                                (float)engine->audio_sample_rate_hz,
+                                FM_DEEMPHASIS_TIME_CONSTANT_US);
+                        } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
+                            demodulator_apply_lowpass(&engine->am_audio_lowpass_state, resampled_audio, resampled_count, AM_AUDIO_LOWPASS_ALPHA);
+                        }
+
+                        audio_level = apply_audio_gain_control(engine, resampled_audio, resampled_count);
+                        total_resampled_count += resampled_count;
+                    }
+
+                    if (engine->audio_requested && engine->audio_output && audio_output_mac_is_running(engine->audio_output) && resampled_count > 0) {
+                        audio_buffer_push(engine->audio_buffer, resampled_audio, resampled_count);
+                        audio_active = true;
+                    }
                 }
             }
         }
@@ -368,7 +437,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
     }
     engine->audio_active = engine->audio_requested && audio_active;
     engine->audio_level = audio_level;
-    engine->audio_samples_generated += resampled_count;
+    engine->audio_samples_generated += total_resampled_count;
     g_mutex_unlock(&engine->lock);
 }
 
@@ -538,6 +607,7 @@ RadioEngine *radio_engine_new(void) {
     engine->audio_active = false;
     engine->audio_samples_generated = 0;
     engine->audio_level = 0.0f;
+    engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
     demodulator_reset_fm(&engine->fm_demod_state);
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
@@ -602,6 +672,7 @@ bool radio_engine_set_sample_rate(RadioEngine *engine, uint32_t sample_rate_hz, 
 
     g_mutex_lock(&engine->lock);
     engine->sample_rate_hz = sample_rate_hz;
+    engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
     if (engine->running) {
         set_status_locked(engine, "Sample rate queued. Stop and restart to apply %.3f MS/s.", sample_rate_hz / 1000000.0);
@@ -626,6 +697,7 @@ bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode,
 
     g_mutex_lock(&engine->lock);
     engine->demod_mode = demod_mode;
+    engine->audio_gain = 1.0f;
     if (demod_mode != RADIO_DEMOD_MODE_FM) {
         demodulator_reset_fm(&engine->fm_demod_state);
         demodulator_reset_fm_deemphasis(&engine->fm_deemphasis_state);
@@ -661,6 +733,7 @@ bool radio_engine_set_audio_requested(RadioEngine *engine, bool audio_requested,
     engine->audio_requested = audio_requested;
     engine->audio_active = false;
     engine->audio_level = 0.0f;
+    engine->audio_gain = 1.0f;
     g_mutex_unlock(&engine->lock);
 
     if (!audio_requested) {
@@ -699,6 +772,7 @@ bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_
     engine->last_i = 0.0f;
     engine->last_q = 0.0f;
     engine->spectrum_ready = false;
+    engine->audio_gain = 1.0f;
     engine->audio_resample_accumulator = 0.0;
     demodulator_reset_lowpass(&engine->fm_audio_lowpass_state);
     demodulator_reset_lowpass(&engine->am_audio_lowpass_state);
