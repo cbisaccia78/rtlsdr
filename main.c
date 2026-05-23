@@ -211,13 +211,15 @@ static void update_stats(AppWidgets *widgets, const RadioEngineSnapshot *snapsho
     }
 
     stats = g_strdup_printf(
-        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nAudio requested: %s\nAudio active: %s\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
+        "Devices: %u\nCenter freq: %.3f MHz\nSample rate: %.3f MS/s\nDemod mode: %s\nAudio requested: %s\nAudio active: %s\nAudio samples: %llu\nAudio level: %.3f\nTotal IQ samples: %llu\nLast normalized sample: %.4f + %.4fi\nPeak bin: %+.1f kHz at %.1f dB",
         snapshot->device_count,
         snapshot->center_freq_hz / 1000000.0,
         snapshot->sample_rate_hz / 1000000.0,
         demod_mode_label(snapshot->demod_mode),
         snapshot->audio_requested ? "yes" : "no",
         snapshot->audio_active ? "yes" : "no",
+        (unsigned long long)snapshot->audio_samples_generated,
+        snapshot->audio_level,
         (unsigned long long)snapshot->total_samples,
         snapshot->last_i,
         snapshot->last_q,

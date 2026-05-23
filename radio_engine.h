@@ -29,6 +29,8 @@ typedef enum {
  * center_freq_hz: currently configured tuner center frequency.
  * sample_rate_hz: currently configured sample rate.
  * total_samples: cumulative complex IQ samples observed since the last start.
+ * audio_samples_generated: cumulative demodulated audio samples produced.
+ * audio_level: RMS-like level of the latest demodulated block after normalization.
  * last_i / last_q: first normalized IQ sample seen in the latest callback.
  * spectrum_db: FFT magnitudes in dB, shifted so 0 Hz is centered in the array.
  * status: latest human-readable engine status string.
@@ -43,6 +45,8 @@ typedef struct {
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
     uint64_t total_samples;
+    uint64_t audio_samples_generated;
+    float audio_level;
     float last_i;
     float last_q;
     float spectrum_db[RADIO_SPECTRUM_BINS];

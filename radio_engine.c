@@ -1,5 +1,7 @@
 #include "radio_engine.h"
 
+#include "demodulator.h"
+
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <glib.h>
@@ -31,6 +33,8 @@
  * center_freq_hz: requested tuner center frequency in Hz.
  * sample_rate_hz: requested sample rate in Hz.
  * total_samples: cumulative complex IQ samples seen since the current start.
+ * audio_samples_generated: cumulative demodulated samples produced for preview.
+ * audio_level: RMS-like level of the latest demodulated preview block.
  * last_i: normalized in-phase component of the latest callback's first sample.
  * last_q: normalized quadrature component of the latest callback's first sample.
  * window: precomputed Hann window applied before each FFT.
@@ -57,9 +61,13 @@ typedef struct RadioEngine {
     uint32_t center_freq_hz;
     uint32_t sample_rate_hz;
     uint64_t total_samples;
+    uint64_t audio_samples_generated;
+    float audio_level;
     float last_i;
     float last_q;
     float window[RADIO_SPECTRUM_BINS];
+    float complex iq_preview[RADIO_SPECTRUM_BINS];
+    float demod_audio_preview[RADIO_SPECTRUM_BINS];
     float fft_real_in[RADIO_SPECTRUM_BINS];
     float fft_imag_in[RADIO_SPECTRUM_BINS];
     float fft_real_out[RADIO_SPECTRUM_BINS];
@@ -70,6 +78,7 @@ typedef struct RadioEngine {
     bool running;
     bool spectrum_ready;
     RadioDemodMode demod_mode;
+    FmDemodState fm_demod_state;
     bool audio_requested;
     bool audio_active;
     bool stop_requested;
@@ -103,6 +112,20 @@ static void clear_spectrum_locked(RadioEngine *engine) {
     }
 }
 
+static float compute_audio_level(const float *samples, size_t sample_count) {
+    float sum_squares = 0.0f;
+
+    if (!samples || sample_count == 0) {
+        return 0.0f;
+    }
+
+    for (size_t index = 0; index < sample_count; index++) {
+        sum_squares += samples[index] * samples[index];
+    }
+
+    return sqrtf(sum_squares / (float)sample_count);
+}
+
 /*
  * Async RTL-SDR callback.
  *
@@ -116,6 +139,9 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
     float complex first_sample = 0.0f;
     float spectrum_db[RADIO_SPECTRUM_BINS];
     float spectrum_power[RADIO_SPECTRUM_BINS];
+    size_t audio_count = 0;
+    float audio_level = 0.0f;
+    bool audio_active = false;
     bool spectrum_ready = false;
 
     if (num_samples > 0) {
@@ -142,8 +168,31 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
             float q_float = (((float)buf[2 * index + 1] - ADC_CENTER) / ADC_SCALE) - mean_q;
             float window = engine->window[index];
 
+            engine->iq_preview[index] = i_float + q_float * I;
             engine->fft_real_in[index] = i_float * window;
             engine->fft_imag_in[index] = q_float * window;
+        }
+
+        if (engine->audio_requested && engine->demod_mode != RADIO_DEMOD_MODE_OFF) {
+            if (engine->demod_mode == RADIO_DEMOD_MODE_FM) {
+                audio_count = demodulator_demodulate_fm(
+                    &engine->fm_demod_state,
+                    engine->iq_preview,
+                    RADIO_SPECTRUM_BINS,
+                    engine->demod_audio_preview);
+            } else if (engine->demod_mode == RADIO_DEMOD_MODE_AM) {
+                audio_count = demodulator_demodulate_am(
+                    engine->iq_preview,
+                    RADIO_SPECTRUM_BINS,
+                    engine->demod_audio_preview);
+            }
+
+            if (audio_count > 0) {
+                demodulator_remove_dc(engine->demod_audio_preview, audio_count);
+                demodulator_normalize_audio(engine->demod_audio_preview, audio_count);
+                audio_level = compute_audio_level(engine->demod_audio_preview, audio_count);
+                audio_active = true;
+            }
         }
 
         vDSP_DFT_Execute(
@@ -190,6 +239,9 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx) {
         }
         engine->spectrum_ready = true;
     }
+    engine->audio_active = audio_active;
+    engine->audio_level = audio_level;
+    engine->audio_samples_generated += audio_count;
     g_mutex_unlock(&engine->lock);
 }
 
@@ -345,6 +397,9 @@ RadioEngine *radio_engine_new(void) {
     engine->demod_mode = RADIO_DEMOD_MODE_OFF;
     engine->audio_requested = false;
     engine->audio_active = false;
+    engine->audio_samples_generated = 0;
+    engine->audio_level = 0.0f;
+    demodulator_reset_fm(&engine->fm_demod_state);
     engine->device_count = rtlsdr_get_device_count();
     snprintf(engine->status, sizeof(engine->status), "Ready.");
     return engine;
@@ -425,6 +480,9 @@ bool radio_engine_set_demod_mode(RadioEngine *engine, RadioDemodMode demod_mode,
 
     g_mutex_lock(&engine->lock);
     engine->demod_mode = demod_mode;
+    if (demod_mode != RADIO_DEMOD_MODE_FM) {
+        demodulator_reset_fm(&engine->fm_demod_state);
+    }
     g_mutex_unlock(&engine->lock);
 
     copy_message(error_message, error_message_size, "Demod mode updated.");
@@ -441,6 +499,7 @@ bool radio_engine_set_audio_requested(RadioEngine *engine, bool audio_requested,
     g_mutex_lock(&engine->lock);
     engine->audio_requested = audio_requested;
     engine->audio_active = false;
+    engine->audio_level = 0.0f;
     g_mutex_unlock(&engine->lock);
 
     copy_message(error_message, error_message_size, audio_requested ? "Audio requested." : "Audio disabled.");
@@ -466,6 +525,8 @@ bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_
     engine->device_index = device_index;
     engine->device_count = rtlsdr_get_device_count();
     engine->total_samples = 0;
+    engine->audio_samples_generated = 0;
+    engine->audio_level = 0.0f;
     engine->last_i = 0.0f;
     engine->last_q = 0.0f;
     engine->spectrum_ready = false;
@@ -473,6 +534,8 @@ bool radio_engine_start(RadioEngine *engine, uint32_t device_index, char *error_
         engine->spectrum_db[index] = SPECTRUM_FLOOR_DB;
     }
     engine->stop_requested = false;
+    engine->audio_active = false;
+    demodulator_reset_fm(&engine->fm_demod_state);
     set_status_locked(engine, "Starting stream...");
     g_mutex_unlock(&engine->lock);
 
@@ -530,6 +593,8 @@ void radio_engine_get_snapshot(RadioEngine *engine, RadioEngineSnapshot *snapsho
     snapshot->center_freq_hz = engine->center_freq_hz;
     snapshot->sample_rate_hz = engine->sample_rate_hz;
     snapshot->total_samples = engine->total_samples;
+    snapshot->audio_samples_generated = engine->audio_samples_generated;
+    snapshot->audio_level = engine->audio_level;
     snapshot->last_i = engine->last_i;
     snapshot->last_q = engine->last_q;
     memcpy(snapshot->spectrum_db, engine->spectrum_db, sizeof(snapshot->spectrum_db));
