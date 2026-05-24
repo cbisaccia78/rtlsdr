@@ -41,6 +41,9 @@
 #define RTLSDR_ASYNC_BUFFER_COUNT 12U
 #define RTLSDR_ASYNC_BUFFER_LENGTH 16384U
 #define RTLSDR_ERROR_NO_DEVICE -4
+#define CHANNEL_FILTER_MAX_TAPS 129U
+#define FM_CHANNEL_CUTOFF_HZ 100000U
+#define AM_CHANNEL_CUTOFF_HZ 10000U
 
 /*
  * Internal engine state.
@@ -106,8 +109,11 @@ typedef struct RadioEngine {
     float spectrum_db[RADIO_SPECTRUM_BINS];
     float window_sum;
     float audio_gain;
-    float complex channel_accumulator;
-    uint32_t channel_accumulator_count;
+    float channel_taps[CHANNEL_FILTER_MAX_TAPS];
+    float complex channel_history[CHANNEL_FILTER_MAX_TAPS];
+    uint32_t channel_tap_count;
+    uint32_t channel_history_index;
+    uint32_t channel_decimation_phase;
     double audio_resample_accumulator;
     bool running;
     bool spectrum_ready;
@@ -161,6 +167,77 @@ static uint32_t target_channel_sample_rate_hz(RadioEngine *engine) {
     return engine->demod_mode == RADIO_DEMOD_MODE_AM ? TARGET_AM_CHANNEL_SAMPLE_RATE : TARGET_FM_CHANNEL_SAMPLE_RATE;
 }
 
+static uint32_t target_channel_cutoff_hz(RadioEngine *engine) {
+    if (!engine) {
+        return FM_CHANNEL_CUTOFF_HZ;
+    }
+
+    return engine->demod_mode == RADIO_DEMOD_MODE_AM ? AM_CHANNEL_CUTOFF_HZ : FM_CHANNEL_CUTOFF_HZ;
+}
+
+static void design_channel_filter(RadioEngine *engine) {
+    uint32_t tap_count;
+    uint32_t cutoff_hz;
+    double cutoff_cycles_per_sample;
+    double max_cutoff_cycles_per_sample;
+    double tap_sum = 0.0;
+    double midpoint;
+
+    if (!engine) {
+        return;
+    }
+
+    tap_count = (16U * engine->channel_decimation_factor) + 1U;
+    if (tap_count > CHANNEL_FILTER_MAX_TAPS) {
+        tap_count = CHANNEL_FILTER_MAX_TAPS;
+    }
+    if ((tap_count & 1U) == 0U) {
+        tap_count -= 1U;
+    }
+
+    cutoff_hz = target_channel_cutoff_hz(engine);
+    cutoff_cycles_per_sample = (double)cutoff_hz / (double)engine->sample_rate_hz;
+    max_cutoff_cycles_per_sample = 0.45 / (double)engine->channel_decimation_factor;
+    if (cutoff_cycles_per_sample > max_cutoff_cycles_per_sample) {
+        cutoff_cycles_per_sample = max_cutoff_cycles_per_sample;
+    }
+
+    midpoint = (double)(tap_count - 1U) * 0.5;
+
+    for (uint32_t index = 0; index < CHANNEL_FILTER_MAX_TAPS; index++) {
+        engine->channel_taps[index] = 0.0f;
+        engine->channel_history[index] = 0.0f + 0.0f * I;
+    }
+
+    for (uint32_t index = 0; index < tap_count; index++) {
+        double sample_offset = (double)index - midpoint;
+        double sinc_term;
+        double window;
+        double coefficient;
+
+        if (fabs(sample_offset) < 1.0e-9) {
+            sinc_term = 2.0 * cutoff_cycles_per_sample;
+        } else {
+            sinc_term = sin(2.0 * M_PI * cutoff_cycles_per_sample * sample_offset) / (M_PI * sample_offset);
+        }
+
+        window = 0.54 - (0.46 * cos((2.0 * M_PI * (double)index) / (double)(tap_count - 1U)));
+        coefficient = sinc_term * window;
+        engine->channel_taps[index] = (float)coefficient;
+        tap_sum += coefficient;
+    }
+
+    if (fabs(tap_sum) > 1.0e-12) {
+        for (uint32_t index = 0; index < tap_count; index++) {
+            engine->channel_taps[index] /= (float)tap_sum;
+        }
+    }
+
+    engine->channel_tap_count = tap_count;
+    engine->channel_history_index = 0U;
+    engine->channel_decimation_phase = 0U;
+}
+
 static void configure_channelizer(RadioEngine *engine) {
     uint32_t target_sample_rate_hz;
     uint32_t decimation_factor;
@@ -177,8 +254,7 @@ static void configure_channelizer(RadioEngine *engine) {
 
     engine->channel_decimation_factor = decimation_factor;
     engine->channel_sample_rate_hz = engine->sample_rate_hz / decimation_factor;
-    engine->channel_accumulator = 0.0f + 0.0f * I;
-    engine->channel_accumulator_count = 0U;
+    design_channel_filter(engine);
 }
 
 static int desired_direct_sampling_mode(uint32_t center_freq_hz) {
@@ -319,16 +395,25 @@ static size_t channelize_iq_block(
     }
 
     for (size_t index = 0; index < input_count; index++) {
-        engine->channel_accumulator += input[index];
-        engine->channel_accumulator_count += 1U;
+        float complex filtered_sample = 0.0f + 0.0f * I;
+        uint32_t history_index;
 
-        if (engine->channel_accumulator_count >= engine->channel_decimation_factor) {
-            if (output_count < output_capacity) {
-                output[output_count++] = engine->channel_accumulator / (float)engine->channel_accumulator_count;
+        engine->channel_history[engine->channel_history_index] = input[index];
+        engine->channel_history_index = (engine->channel_history_index + 1U) % CHANNEL_FILTER_MAX_TAPS;
+        engine->channel_decimation_phase += 1U;
+
+        if (engine->channel_decimation_phase >= engine->channel_decimation_factor) {
+            history_index = engine->channel_history_index;
+            for (uint32_t tap_index = 0; tap_index < engine->channel_tap_count; tap_index++) {
+                history_index = history_index == 0U ? (CHANNEL_FILTER_MAX_TAPS - 1U) : (history_index - 1U);
+                filtered_sample += engine->channel_history[history_index] * engine->channel_taps[tap_index];
             }
 
-            engine->channel_accumulator = 0.0f + 0.0f * I;
-            engine->channel_accumulator_count = 0U;
+            if (output_count < output_capacity) {
+                output[output_count++] = filtered_sample;
+            }
+
+            engine->channel_decimation_phase = 0U;
         }
     }
 
